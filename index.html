@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Nebula Tree</title>
+    <style>
+        /* 背景：加深对比度，增强光感 */
+        body { margin: 0; overflow: hidden; background: radial-gradient(circle at center, #050810 0%, #000000 100%); user-select: none; }
+        canvas { display: block; touch-action: none; }
+        
+        #ui {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #c3fc28; font-family: 'Times New Roman', serif; text-align: center;
+            pointer-events: none; z-index: 10; letter-spacing: 4px; font-style: italic;
+            text-shadow: 0 0 20px rgba(255, 255, 255, 0.8); transition: opacity 1.0s;
+        }
+
+        #photo-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(5, 10, 20, 0.8); backdrop-filter: blur(8px);
+            z-index: 100;
+            display: flex; justify-content: center; align-items: center;
+            visibility: hidden; opacity: 0; 
+            transition: opacity 0.5s ease, visibility 0.5s;
+        }
+        #photo-overlay.active { visibility: visible; opacity: 1; pointer-events: auto; }
+
+        #photo-container {
+            position: relative; width: 85%; max-width: 500px;
+            min-height: 200px;
+            border: 1px solid rgba(255,215,0, 0.4); 
+            background: rgba(255,255,255,0.05); 
+            padding: 10px;
+            box-shadow: 0 0 60px rgba(255, 215, 0, 0.15);
+            transform: scale(0.01); opacity: 0;
+            transition: transform 0.6s cubic-bezier(0.19, 1, 0.22, 1), opacity 0.6s;
+        }
+        #photo-overlay.active #photo-container { transform: scale(1); opacity: 1; }
+        
+        #photo-img { 
+            width: 100%; display: block; border-radius: 2px;
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #photo-img.loaded { opacity: 1; }
+        
+        #close-btn {
+            position: absolute; top: -40px; right: 0; 
+            color: #FFD700; font-size: 30px; cursor: pointer; text-shadow: 0 0 10px #FFD700;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h1 style="font-size: 18px; font-weight: normal;">STARDUST MEMORIES</h1>
+        <p style="font-size: 20px; opacity: 1.1; margin-top: 10px;">小鲨鱼</p>
+    </div>
+
+    <audio id="bgm" loop preload="auto">
+        <source src="bg.mp3" type="audio/mpeg">
+    </audio>
+
+    <div id="photo-overlay">
+        <div id="photo-container">
+            <div id="close-btn">×</div>
+            <img id="photo-img" src="" alt="Memory">
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+
+<script>
+    const PHOTO_LIST = [
+        "https://picsum.photos/id/1011/600/800", 
+        "https://picsum.photos/id/1015/600/800", 
+        "https://picsum.photos/id/1016/600/800", 
+        "https://picsum.photos/id/1018/600/800"
+    ];
+    let currentPhotoIndex = 0;
+
+    let scene, camera, renderer, clock;
+    let instancedSystem, snowSystem, topStar;
+    let pmremGenerator;
+    
+    // 状态机: HEART -> TO_SHARK -> SHARK_SWIM -> TO_TREE -> TREE
+    let state = 'HEART'; 
+    let stateStartTime = 0;
+    
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    let isPhotoOpen = false;
+    
+    const CONFIG = {
+        count: 4200,           // 稍微增加粒子数，让体积感更强
+        interactCount: 150, 
+        
+        durationToShark: 3500,  
+        durationSwim: 6000,     
+        durationToTree: 5000,   
+
+        heartColors: [0xFFE4E1, 0xFFC0CB, 0xFFFFFF], 
+        sharkColors: [0x00FFFF, 0x0088FF, 0x004488, 0x88CCFF], 
+        treeBaseColor: 0xaabbcc, // 树的主体：冷银色/星尘色
+        treeGoldColor: 0xFFD700  // 交互点：亮金色
+    };
+
+    const posHeart = new Float32Array(CONFIG.count * 3);
+    const posShark = new Float32Array(CONFIG.count * 3); 
+    const posTree = new Float32Array(CONFIG.count * 3);
+    
+    const scatterOffsets = new Float32Array(CONFIG.count * 3); 
+    const delays = new Float32Array(CONFIG.count); 
+    
+    const instanceFinalScale = new Float32Array(CONFIG.count); 
+    const instanceHeat = new Float32Array(CONFIG.count); 
+    
+    const dummy = new THREE.Object3D();
+    const _color = new THREE.Color();
+    const _targetColor = new THREE.Color();
+    
+    init();
+    animate();
+
+    function init() {
+        scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x050810, 0.001);
+
+        camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 0, 90);
+        camera.lookAt(0, 5, 0);
+
+        renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        renderer.physicallyCorrectLights = true; 
+        renderer.outputEncoding = THREE.sRGBEncoding;
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.2;
+        
+        document.body.appendChild(renderer.domElement);
+        clock = new THREE.Clock();
+
+        generateEnvironment(); 
+        setupLights();
+        calculateAllShapes(); 
+        
+        createCrystalSystem(); 
+        createSnow();          
+        createTopStar();
+
+        window.addEventListener('resize', onResize);
+        document.addEventListener('pointerdown', onPointerDown);
+        
+        document.getElementById('close-btn').addEventListener('click', closePhoto);
+        document.getElementById('photo-overlay').addEventListener('click', (e) => {
+            if(e.target.id === 'photo-overlay') closePhoto();
+        });
+
+        preloadImages();
+        const bgm = document.getElementById('bgm');
+        if(bgm) bgm.volume = 1.0; 
+    }
+
+    function generateEnvironment() {
+        pmremGenerator = new THREE.PMREMGenerator(renderer);
+        pmremGenerator.compileEquirectangularShader();
+        const envScene = new THREE.Scene();
+        envScene.background = new THREE.Color(0x050810);
+        const geometry = new THREE.BoxGeometry();
+        for (let i = 0; i < 30; i++) {
+            const material = new THREE.MeshBasicMaterial({ 
+                color: new THREE.Color().setHSL(Math.random(), 0.5, 0.8), toneMapped: false 
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(
+                (Math.random() - 0.5) * 40,
+                (Math.random() - 0.5) * 40,
+                (Math.random() - 0.5) * 40
+            );
+            mesh.scale.setScalar(Math.random() * 2 + 1);
+            envScene.add(mesh);
+        }
+        scene.environment = pmremGenerator.fromScene(envScene).texture;
+        envScene.clear();
+    }
+
+    function setupLights() {
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.4); 
+        scene.add(ambientLight);
+        const mainLight = new THREE.PointLight(0xffd700, 2.0, 400);
+        mainLight.position.set(50, 50, 100);
+        scene.add(mainLight);
+        const moonLight = new THREE.DirectionalLight(0xaaddff, 3.0);
+        moonLight.position.set(-50, 100, -50);
+        scene.add(moonLight);
+    }
+
+    function getHeartPos(t, scale = 1) {
+        const x = 16 * Math.pow(Math.sin(t), 3);
+        const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+        const z = (Math.random() - 0.5) * 12; 
+        return new THREE.Vector3(x * scale, y * scale, z * scale);
+    }
+
+    function calculateAllShapes() {
+        for (let i = 0; i < CONFIG.count; i++) {
+            // === 1. 圣诞树形态 (优雅重构) ===
+            const pct = i / CONFIG.count; 
+            
+            // 高度：线性分布
+            const yTree = -85 + pct * 170; 
+            
+            // 基础半径：使用 Power 函数 (1.2次方) 创造稍微内凹的流线型，比直线更优雅
+            // 底部宽，顶部尖
+            const baseRadius = 70 * Math.pow(1 - pct, 1.2);
+            
+            // [关键] 随机散布逻辑
+            // 不再死锁在表面。我们在表面附近进行高斯分布偏移
+            // 30% 的粒子紧贴表面 (勾勒轮廓)，70% 的粒子向内或向外扩散 (制造体积感)
+            const randomSpread = (Math.random() - 0.5) * 20 * (1 - pct); // 底部扩散大，顶部扩散小
+            const rTree = Math.max(0, baseRadius + randomSpread);
+            
+            // 角度：螺旋 + 随机扰动
+            // 黄金角保证均匀，但加上 random() * 0.5 打破数学的死板
+            const theta = i * 2.39996 + (Math.random() * 0.5);
+
+            posTree[i*3] = Math.cos(theta) * rTree;
+            posTree[i*3+1] = yTree;
+            posTree[i*3+2] = Math.sin(theta) * rTree;
+
+            // === 2. 爱心形态 ===
+            const ht = Math.random() * Math.PI * 2;
+            const hScale = Math.random() * 0.8 + 0.2; 
+            const hP = getHeartPos(ht, 1.2 * hScale);
+            posHeart[i*3] = hP.x;
+            posHeart[i*3+1] = hP.y + 10;
+            posHeart[i*3+2] = hP.z;
+
+            // === 3. 鲨鱼形态 ===
+            let sx, sy, sz;
+            const seed = Math.random();
+            
+            // 将全身总长设定为 x: -80 (尾) 到 60 (头)
+            
+            // >>> A. 标志性背鳍 (Dorsal Fin) - 10% 的粒子 <<<
+            // 鲨鱼的灵魂：高耸的三角形
+            if (seed < 0.10) {
+                // 位置：背部偏前 (x: 0 到 20)
+                const t = Math.random();
+                sx = 0 + t * 25; 
+                
+                // 高度：形成锐角三角形
+                // 越靠近前沿(x=20)越高，往后(x=0)变低
+                const h = t * 25; 
+                sy = 12 + Math.random() * h; // 基础高度12 + 随机高度
+                
+                // 厚度：极薄
+                sz = (Math.random() - 0.5) * 2 * (1-t); // 塔尖更薄
+            }
+            
+            // >>> B. 胸鳍 (Pectoral Fins) - 10% 的粒子 <<<
+            // 像飞机的翅膀，位于底部两侧
+            else if (seed < 0.20) {
+                const t = Math.random();
+                sx = 10 + t * 20; // 位于头部后方
+                
+                // 向两侧延伸
+                const wingSpan = t * 35; 
+                const side = Math.random() > 0.5 ? 1 : -1;
+                sz = (8 + wingSpan) * side;
+                
+                // 向下倾斜
+                sy = -5 - Math.random() * 5; 
+            }
+            
+            // >>> C. 非对称尾鳍 (Caudal Fin) - 20% 的粒子 <<<
+            // 鲨鱼尾巴：上长下短的新月形
+            else if (seed < 0.40) {
+                // 尾部基点 x: -70
+                const t = Math.random();
+                sx = -70 - t * 30; // 向后延伸到 -100
+                
+                // 分叉逻辑
+                if (Math.random() < 0.65) {
+                    // 上叶 (Upper Lobe): 长且上扬
+                    const curve = t * t * 40; 
+                    sy = curve + (Math.random()-0.5)*3;
+                    // 后掠感
+                    sx -= curve * 0.5;
+                } else {
+                    // 下叶 (Lower Lobe): 短且下压
+                    const curve = t * 15;
+                    sy = -curve + (Math.random()-0.5)*2;
+                    sx -= curve * 0.2;
+                }
+                sz = (Math.random()-0.5) * 4; // 尾巴很扁
+            }
+            
+            // >>> D. 躯干 (Main Body) - 60% 的粒子 <<<
+            // 完美的鱼雷流线型
+            else {
+                // 分布：x 从 -70 到 60
+                // 我们用 Power 函数让粒子更多聚集在头部和背部，显出体积感
+                const t = Math.random();
+                sx = -70 + t * 130;
+                
+                // 身体曲线计算 (0~1)
+                // 头部(1.0)较圆，身体(0.7)最厚，尾部(0.0)收缩
+                const normalizeX = (sx + 70) / 130; 
+                
+                // 复合曲线模拟鲨鱼体态：头尖、胸厚、尾细
+                let thickness;
+                if (normalizeX > 0.8) {
+                    // 头部：圆锥状
+                    thickness = Math.sin((normalizeX - 0.8) * 5 * Math.PI) * 20;
+                } else {
+                    // 身体：纺锤状
+                    thickness = Math.sin(normalizeX * Math.PI * 0.8) * 22;
+                }
+                
+                // 随机填充体积
+                const theta = Math.random() * Math.PI * 2;
+                // 稍微压扁一点 (y轴 0.8)，因为鲨鱼不是圆柱体
+                const r = Math.sqrt(Math.random()) * Math.max(2, thickness);
+                
+                sy = r * Math.sin(theta) * 0.85; 
+                sz = r * Math.cos(theta);
+            }
+
+            posShark[i*3] = sx;
+            posShark[i*3+1] = sy;
+            posShark[i*3+2] = sz;
+
+            // === 4. 辅助数据 ===
+            const sDir = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize();
+            const sDist = 60 + Math.random() * 60;
+            scatterOffsets[i*3] = sDir.x * sDist;
+            scatterOffsets[i*3+1] = sDir.y * sDist;
+            scatterOffsets[i*3+2] = sDir.z * sDist;
+
+            delays[i] = Math.random();
+
+            const isBig = (i % Math.floor(CONFIG.count / CONFIG.interactCount)) === 0;
+            // 增加大小的随机性，避免只有两种尺寸
+            instanceFinalScale[i] = isBig ? (Math.random()*1.5 + 3.0) : (Math.random()*0.5 + 0.1);
+        }
+    }
+
+    function createCrystalSystem() {
+        const geometry = new THREE.OctahedronGeometry(0.5, 0); 
+        const material = new THREE.MeshStandardMaterial({
+            color: 0xffffff, roughness: 0.05, metalness: 0.95, flatShading: true,
+            emissive: 0x000000, envMapIntensity: 2.0
+        });
+
+        instancedSystem = new THREE.InstancedMesh(geometry, material, CONFIG.count);
+        instancedSystem.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        instancedSystem.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(CONFIG.count * 3), 3);
+
+        for (let i = 0; i < CONFIG.count; i++) {
+            dummy.position.set(posHeart[i*3], posHeart[i*3+1], posHeart[i*3+2]);
+            const s = instanceFinalScale[i] * 0.7; 
+            dummy.scale.set(s, s, s);
+            dummy.rotation.set(Math.random()*Math.PI, Math.random()*Math.PI, 0);
+            dummy.updateMatrix();
+            instancedSystem.setMatrixAt(i, dummy.matrix);
+
+            const col = new THREE.Color().setHex(CONFIG.heartColors[i%CONFIG.heartColors.length]);
+            instancedSystem.setColorAt(i, col);
+        }
+        scene.add(instancedSystem);
+    }
+
+    function createSnow() {
+        const geometry = new THREE.BufferGeometry();
+        const positions = [];
+        for(let i=0; i<2000; i++) {
+            positions.push((Math.random()-0.5)*400, Math.random()*400-200, (Math.random()-0.5)*400);
+        }
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        const material = new THREE.PointsMaterial({ 
+            color: 0xffffff, size: 0.8, transparent: true, opacity: 0.6 
+        });
+        snowSystem = new THREE.Points(geometry, material);
+        scene.add(snowSystem);
+    }
+
+    function createTopStar() {
+        const geometry = new THREE.OctahedronGeometry(6, 0); 
+        const material = new THREE.MeshStandardMaterial({ 
+            color: 0xFFFFFF, emissive: 0xffffee, emissiveIntensity: 2.0, roughness: 0, metalness: 0.5
+        });
+        topStar = new THREE.Mesh(geometry, material);
+        topStar.position.set(0, 90, 0); // 稍微高一点，脱离树尖
+        topStar.scale.set(0.7, 1.2, 0.7); 
+        topStar.visible = false; 
+        
+        const light = new THREE.PointLight(0xFFD700, 2, 60);
+        topStar.add(light);
+        scene.add(topStar);
+    }
+
+    function easeInOutCubic(x) { return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; }
+
+    function trigger() {
+        if (state === 'HEART') {
+            state = 'TO_SHARK';
+            stateStartTime = Date.now();
+            document.getElementById('ui').style.opacity = 0;
+            const bgm = document.getElementById('bgm');
+            if(bgm && bgm.paused) bgm.play().catch(e=>{});
+        }
+    }
+
+    function updateParticles() {
+        const now = Date.now();
+        const time = now * 0.001;
+
+        if (state === 'HEART') {
+            const pulse = 1 + Math.sin(time * 3) * 0.05;
+            instancedSystem.scale.set(pulse, pulse, pulse);
+            instancedSystem.rotation.y = Math.sin(time * 0.5) * 0.1;
+        }
+
+        else if (state === 'TO_SHARK') {
+            const elapsed = now - stateStartTime;
+            let progress = Math.min(1, elapsed / CONFIG.durationToShark);
+            const t = easeInOutCubic(progress);
+
+            camera.position.z = 90 + t * 60; 
+            camera.position.y = t * 10;
+            camera.lookAt(0, 5 - t*5, 0);
+
+            for (let i = 0; i < CONFIG.count; i++) {
+                let localT = (progress * 1.5) - delays[i] * 0.5;
+                localT = Math.max(0, Math.min(1, localT));
+                const easeLocal = easeInOutCubic(localT);
+
+                const start = new THREE.Vector3(posHeart[i*3], posHeart[i*3+1], posHeart[i*3+2]);
+                const end = new THREE.Vector3(posShark[i*3], posShark[i*3+1], posShark[i*3+2]);
+                const scatter = Math.sin(localT * Math.PI) * 1.2; 
+                
+                const curr = new THREE.Vector3().lerpVectors(start, end, easeLocal);
+                curr.x += scatterOffsets[i*3] * scatter;
+                curr.y += scatterOffsets[i*3+1] * scatter;
+                curr.z += scatterOffsets[i*3+2] * scatter;
+
+                dummy.position.copy(curr);
+                dummy.rotation.set(localT*Math.PI*2, localT*Math.PI*2, -Math.PI/2 * easeLocal);
+                
+                const s = instanceFinalScale[i];
+                const sShark = new THREE.Vector3(s, s*0.6, s);
+                const sHeart = new THREE.Vector3(s*0.8, s*0.8, s*0.8);
+                dummy.scale.lerpVectors(sHeart, sShark, easeLocal);
+
+                dummy.updateMatrix();
+                instancedSystem.setMatrixAt(i, dummy.matrix);
+
+                const c1 = new THREE.Color().setHex(CONFIG.heartColors[i%CONFIG.heartColors.length]);
+                const c2 = new THREE.Color().setHex(CONFIG.sharkColors[i%CONFIG.sharkColors.length]);
+                _color.copy(c1).lerp(c2, easeLocal);
+                instancedSystem.setColorAt(i, _color);
+            }
+            instancedSystem.instanceMatrix.needsUpdate = true;
+            instancedSystem.instanceColor.needsUpdate = true;
+
+            if (progress >= 1) {
+                state = 'SHARK_SWIM';
+                stateStartTime = now;
+            }
+        }
+
+        else if (state === 'SHARK_SWIM') {
+            const elapsed = now - stateStartTime;
+            camera.position.x = Math.sin(time * 0.2) * 20;
+            camera.lookAt(0, 0, 0);
+
+            for (let i = 0; i < CONFIG.count; i++) {
+                const ox = posShark[i*3];
+                const oy = posShark[i*3+1];
+                const oz = posShark[i*3+2];
+                const swimOffsetZ = Math.sin(time * 3 + ox * 0.05) * Math.min(0, (ox - 20) * 0.2);
+                const swimOffsetY = Math.cos(time * 2 + ox * 0.05) * 2;
+
+                dummy.position.set(ox, oy + swimOffsetY, oz + swimOffsetZ);
+                dummy.rotation.set(0, 0, -Math.PI/2 + swimOffsetZ * 0.03); 
+                
+                const s = instanceFinalScale[i];
+                dummy.scale.set(s, s*0.6, s);
+                dummy.updateMatrix();
+                instancedSystem.setMatrixAt(i, dummy.matrix);
+            }
+            instancedSystem.instanceMatrix.needsUpdate = true;
+
+            if (elapsed > CONFIG.durationSwim) {
+                state = 'TO_TREE';
+                stateStartTime = now;
+            }
+        }
+
+        else if (state === 'TO_TREE') {
+            const elapsed = now - stateStartTime;
+            let progress = Math.min(1, elapsed / CONFIG.durationToTree);
+            const t = easeInOutCubic(progress);
+
+            camera.position.z = 150 - t * 40; 
+            camera.position.y = 10 - t * 10;
+            camera.position.x = (1-t) * 20; 
+            camera.lookAt(0, t * 10, 0); 
+
+            for (let i = 0; i < CONFIG.count; i++) {
+                let localT = (progress * 1.5) - delays[i] * 0.5;
+                localT = Math.max(0, Math.min(1, localT));
+                const easeLocal = easeInOutCubic(localT);
+
+                const start = new THREE.Vector3(posShark[i*3], posShark[i*3+1], posShark[i*3+2]);
+                const end = new THREE.Vector3(posTree[i*3], posTree[i*3+1], posTree[i*3+2]);
+                const scatter = Math.sin(localT * Math.PI) * 1.5; 
+                
+                const curr = new THREE.Vector3().lerpVectors(start, end, easeLocal);
+                curr.x += scatterOffsets[i*3] * scatter;
+                curr.y += scatterOffsets[i*3+1] * scatter + scatter * 20; 
+                curr.z += scatterOffsets[i*3+2] * scatter;
+
+                dummy.position.copy(curr);
+                
+                // 树形态的旋转：随机化，让光斑闪烁更自然
+                dummy.rotation.set(
+                    localT * Math.PI * 4 + i, 
+                    localT * Math.PI * 2 + i, 
+                    -Math.PI/2 * (1 - easeLocal)
+                );
+
+                const s = instanceFinalScale[i];
+                const sShark = new THREE.Vector3(s, s*0.6, s);
+                const sTree = new THREE.Vector3(s, s, s);
+                dummy.scale.lerpVectors(sShark, sTree, easeLocal);
+
+                dummy.updateMatrix();
+                instancedSystem.setMatrixAt(i, dummy.matrix);
+
+                // [配色调整] 
+                const isBig = instanceFinalScale[i] > 2.5; 
+                const targetHex = isBig ? CONFIG.treeGoldColor : CONFIG.treeBaseColor;
+                
+                const c1 = new THREE.Color().setHex(CONFIG.sharkColors[i%CONFIG.sharkColors.length]);
+                const c2 = new THREE.Color().setHex(targetHex);
+                
+                _color.copy(c1).lerp(c2, easeLocal);
+                instancedSystem.setColorAt(i, _color);
+            }
+            instancedSystem.instanceMatrix.needsUpdate = true;
+            instancedSystem.instanceColor.needsUpdate = true;
+
+            if (progress >= 1) {
+                state = 'TREE';
+                topStar.visible = true; 
+            }
+        }
+
+        else if (state === 'TREE') {
+            instancedSystem.rotation.y += 0.001;
+            topStar.scale.lerp(new THREE.Vector3(0.7, 1.2, 0.7), 0.05); 
+            topStar.rotation.y -= 0.005;
+            
+            updateTwinkle(); 
+        }
+    }
+
+    function updateTwinkle() {
+        for (let i = 0; i < CONFIG.count; i++) {
+            if (instanceHeat[i] > 0) {
+                instanceHeat[i] -= 0.05;
+                if (instanceHeat[i] <= 0) {
+                    const isBig = instanceFinalScale[i] > 2.5;
+                    const hex = isBig ? CONFIG.treeGoldColor : CONFIG.treeBaseColor;
+                    _color.setHex(hex);
+                    instancedSystem.setColorAt(i, _color);
+                } else {
+                    _color.setHex(0xFFFFFF); 
+                    instancedSystem.setColorAt(i, _color);
+                }
+                instancedSystem.instanceColor.needsUpdate = true;
+            } 
+            else if (Math.random() < 0.001) {
+                _color.setHex(0xFFFFFF);
+                instancedSystem.setColorAt(i, _color);
+                instanceHeat[i] = 0.3; 
+                instancedSystem.instanceColor.needsUpdate = true;
+            }
+        }
+    }
+
+    function onPointerDown(e) {
+        const bgm = document.getElementById('bgm');
+        if (bgm && bgm.paused) bgm.play().catch(e=>{});
+
+        if (state === 'HEART') {
+            trigger();
+            return;
+        }
+        
+        if (state === 'TREE') {
+            if (isPhotoOpen) return;
+
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObject(instancedSystem);
+
+            if (intersects.length > 0) {
+                for(let res of intersects) {
+                    const id = res.instanceId;
+                    if (instanceFinalScale[id] > 2.0) {
+                        instanceHeat[id] = 2.0; 
+                        instancedSystem.setColorAt(id, new THREE.Color(0xFFFFFF));
+                        instancedSystem.instanceColor.needsUpdate = true;
+
+                        instancedSystem.getMatrixAt(id, dummy.matrix);
+                        const pos = new THREE.Vector3().setFromMatrixPosition(dummy.matrix);
+                        openPhoto(pos);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    function openPhoto(pos3D) {
+        const imgEl = document.getElementById('photo-img');
+        imgEl.classList.remove('loaded'); 
+        if (PHOTO_LIST.length > 0) {
+            const newSrc = PHOTO_LIST[currentPhotoIndex];
+            imgEl.onload = () => { imgEl.classList.add('loaded'); };
+            imgEl.src = newSrc;
+            currentPhotoIndex = (currentPhotoIndex + 1) % PHOTO_LIST.length;
+        }
+        const screenPos = pos3D.clone().project(camera);
+        const clickX = (screenPos.x * 0.5 + 0.5) * window.innerWidth;
+        const clickY = (-screenPos.y * 0.5 + 0.5) * window.innerHeight;
+        const container = document.getElementById('photo-container');
+        const overlay = document.getElementById('photo-overlay');
+        const containerW = container.offsetWidth || 300; 
+        const containerH = container.offsetHeight || 400;
+        const originX = clickX - (window.innerWidth - containerW) / 2;
+        const originY = clickY - (window.innerHeight - containerH) / 2;
+        container.style.transition = 'none';
+        container.style.transformOrigin = `${originX}px ${originY}px`;
+        void container.offsetWidth;
+        container.style.transition = 'transform 0.6s cubic-bezier(0.19, 1, 0.22, 1), opacity 0.6s';
+        overlay.classList.add('active');
+        isPhotoOpen = true;
+    }
+
+    function closePhoto() {
+        document.getElementById('photo-overlay').classList.remove('active');
+        setTimeout(() => { 
+            isPhotoOpen = false; 
+            document.getElementById('photo-img').classList.remove('loaded');
+        }, 500);
+    }
+
+    function preloadImages() {
+        PHOTO_LIST.forEach(url => { const img = new Image(); img.src = url; });
+    }
+
+    function onResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const snowPos = snowSystem.geometry.attributes.position.array;
+        for(let i=0; i<2000; i++) {
+            snowPos[i*3+1] -= 0.15; 
+            if(snowPos[i*3+1] < -200) snowPos[i*3+1] = 200;
+        }
+        snowSystem.geometry.attributes.position.needsUpdate = true;
+        snowSystem.rotation.y += 0.0003;
+        updateParticles();
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
